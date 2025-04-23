@@ -1,113 +1,128 @@
+import socket
 from matplotlib import pyplot as plt
 import matplotlib
-from pyparsing import alphas  # (not used — can be removed if unused)
-
-matplotlib.use('TkAgg')  # Use the TkAgg backend for GUI rendering
 import numpy as np
 
-# Create a figure with black background
+
+exit_requested = False  # Global flag
+def on_key_press(event):
+    global exit_requested
+    if event.key == 'q':
+        print("Exit requested by user (pressed 'q').")
+        exit_requested = True
+
+# Use GUI backend
+matplotlib.use('TkAgg')
+
+# ---- Radar GUI Setup ----
 fig = plt.figure(facecolor='black')
-
-# Hide the default toolbar
-fig.canvas.toolbar.pack_forget()
-
-# Set the window title
-fig.canvas.manager.set_window_title("Ultrasonic Radar using FreeRTOS and Pico W")
-
-# Get the figure manager and maximize the window (Linux-specific way)
+fig.canvas.manager.set_window_title("Ultrasonic Radar via TCP")
 mng = plt.get_current_fig_manager()
-mng.window.attributes('-zoomed', True)  # For Linux
+mng.window.attributes('-zoomed', True)
 
-# Create a polar subplot with custom background color
 ax = fig.add_subplot(1, 1, 1, polar=True, facecolor='#006b70')
-
-# Customize tick label sizes and colors
-ax.tick_params(axis='x', labelsize=20)  # Angular ticks
-ax.tick_params(axis='y', labelsize=20)  # Radial ticks
+ax.tick_params(axis='x', labelsize=20)
+ax.tick_params(axis='y', labelsize=20)
 ax.tick_params(axis='both', which='major', colors='w', labelsize=20)
 
-# Define radar range and angle limits
 r_max = 100
 ax.set_ylim(0.0, r_max)
 ax.set_xlim(0.0, np.pi)
-
-# Adjust the subplot size within the figure
 ax.set_position([-0.05, -0.05, 1.1, 1.05])
+ax.set_rticks(np.linspace(0, r_max, 11))
+ax.set_thetagrids(np.linspace(0.0, 180, 19))
 
-# Set radial ticks and angular grid lines
-ax.set_rticks(np.linspace(0.0, r_max, 5))
-ax.set_thetagrids(np.linspace(0.0, 180, 12))
-
-# Define angles from 0 to 180 degrees (in radians)
-angles = np.arange(0, 181, 1)
-theta = angles * (np.pi / 180)
-
-# Initialize plot for red dots (detected points)
 pols, = ax.plot([], linestyle='', marker='o', markerfacecolor='r',
-                markeredgecolor='w', markersize=8.0, markeredgewidth=1.0,
-                alpha=0.5)
-# Optional sweep line
-line1 = ax.plot([], color='w', linewidth=3.0)
+                markeredgecolor='w', markersize=12.0, markeredgewidth=1.0, alpha=0.8)
+line1 = ax.plot([], color='w', linewidth=1.0)
 
-# Initial canvas draw
+# Prepare canvas
 fig.canvas.draw()
-
-# Distance array placeholder (initial values)
-dists = np.ones((len(angles), ))
-
-# Copy the background for efficient blitting
 axbackground = fig.canvas.copy_from_bbox(ax.bbox)
 
-# Index to progressively draw points
-index = 0
+# ---- TCP Setup ----
+HOST = "192.168.0.104"   # IP address of the computer (Pico W connects to this)
+PORT = 1234              # Must match Pico's SERVER_PORT
 
-# Store lines from dots to r_max
+server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server_sock.bind((HOST, PORT))
+server_sock.listen(1)
+
+print(f"Waiting for Pico W on {HOST}:{PORT} ...")
+conn, addr = server_sock.accept()
+print(f"Connected by {addr}")
+
+# ---- Data Storage ----
+angles = []
+distances = []
 lines = []
 
-# Main loop
-while True:
+# ---- Read + Draw Loop ----
+buffer = ""
+while not exit_requested:
     try:
-        # Restore clean background
         fig.canvas.restore_region(axbackground)
 
-        # Simulate data (use real input here if needed)
-        simulated_dists = 40 + 30 * np.sin(2 * theta + index * 0.05)
-        dists = simulated_dists
+        # Receive data (TCP is stream-based, we buffer by \n)
+        data = conn.recv(1024)
+        if not data:
+            break
 
-        # Plot progressively more dots
-        if index < len(theta):
-            pols.set_data(theta[:index], dists[:index])
-            index += 1
+        buffer += data.decode()
+        while '\n' in buffer:
+            line, buffer = buffer.split('\n', 1)
+            if "Angle" in line and "Distance" in line:
+                try:
+                    parts = line.strip().split(',')
+                    angle = int(parts[0].split(':')[1].strip())
+                    dist = float(parts[1].split(':')[1].replace("cm", "").strip())
+                    print(f"The angle is: {angle} and distance is: {dist}")
 
-        # Optional static sweep line (can animate if desired)
-        line1[0].set_data([theta[90], theta[90]], [0, r_max])
+                    angles.append(np.deg2rad(angle))
+                    distances.append(dist)
 
-        # Remove old radial lines
-        for line in lines:
-            line.remove()
-        lines.clear()
+                    # Clear data every 18 points (i.e., full sweep)
+                    if len(angles) > 18:
+                        angles.clear()
+                        distances.clear()
+                        for l in lines:
+                            l.remove()
+                        lines.clear()
+                        fig.canvas.restore_region(axbackground)
 
-        # Draw a line from each point to the edge (r_max)
-        for i in range(index):
-            line = ax.plot([theta[i], theta[i]], [dists[i], r_max],
-                           color='lime', linewidth=1.5, alpha=0.5)
-            lines.extend(line)
+                    # Update dots
+                    pols.set_data(angles, distances)
 
-        # Redraw updated elements
-        ax.draw_artist(pols)
-        ax.draw_artist(line1[0])
-        for line in lines:
-            ax.draw_artist(line)
+                    for l in lines:
+                        l.remove()
+                    lines.clear()
 
-        # Refresh the canvas (only the changed area)
-        fig.canvas.blit(ax.bbox)
+                    # Draw lines from each point to outer ring
+                    for i in range(len(angles)):
+                        line = ax.plot([angles[i], angles[i]], [distances[i], r_max],
+                                       color='lime', linewidth=5, alpha=0.5)
+                        lines.extend(line)
 
-        # Control speed of updates
-        plt.pause(0.01)
+                    # Optional sweep line
+                    line1[0].set_data([np.deg2rad(90), np.deg2rad(90)], [0, r_max])
+
+                    ax.draw_artist(pols)
+                    ax.draw_artist(line1[0])
+                    for line in lines:
+                        ax.draw_artist(line)
+
+                    fig.canvas.blit(ax.bbox)
+                    plt.pause(0.01)
+
+                except Exception as e:
+                    print("Parse error:", e)
 
     except KeyboardInterrupt:
-        plt.close('all')
-        print("Keyboard Interrupt")
         break
 
-exit()
+# Cleanup
+conn.close()
+server_sock.close()
+plt.close('all')
+print("Radar cerrado correctamente.")
