@@ -83,7 +83,7 @@ while not exit_requested:
                     distances.append(dist)
 
                     # Clear data every 18 points (i.e., full sweep)
-                    if len(angles) > 18:
+                    if len(angles) > 19:
                         angles.clear()
                         distances.clear()
                         for l in lines:
